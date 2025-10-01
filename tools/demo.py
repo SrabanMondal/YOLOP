@@ -132,38 +132,43 @@ def detect(cfg,opt):
         img_det = show_seg_result(img_det, (da_seg_mask, ll_seg_mask), _, _, is_demo=True)
 
         if len(det):
-            det[:,:4] = scale_coords(img.shape[2:],det[:,:4],img_det.shape).round()
+            det[:,:4] = scale_coords(img.shape[2:], det[:,:4], img_det.shape).round()
             status = "NORMAL"
             STOP_TH = 8    # meters
             SLOW_TH = 15   # meters
-            car_speed = 30 # km/h demo value
+            car_speed = 30 # km/h demo value (default normal)
 
-            for *xyxy,conf,cls in reversed(det):
-                # original label
-                label_det_pred = f'{names[int(cls)]} {conf:.2f}'
-
-                # crude distance estimation from bbox height
-                h_pixels = xyxy[3] - xyxy[1]
+            for *xyxy, conf, cls in reversed(det):
+                # crude distance estimation (single camera formula)
+                h_pixels = xyxy[3] - xyxy[1]  # bbox height
                 if h_pixels > 0:
-                    distance = int((1.6 * 700) / h_pixels)  # assume avg car height=1.6m, focal=700
+                    distance = int((1.6 * 700) / h_pixels)  # 1.6m avg car height, focal=700 px
                 else:
                     distance = 999
 
-                # update status based on distance
+                # update driving status based on closest object
                 if distance < STOP_TH:
                     status = "STOP"
                 elif distance < SLOW_TH and status != "STOP":
                     status = "SLOW"
 
-                # draw bbox + distance
-                plot_one_box(xyxy, img_det , label=f"{names[int(cls)]} {distance}m", 
-                            color=colors[int(cls)], line_thickness=2)
+                # dynamic speed update for demo
+                if status == "STOP":
+                    car_speed = 0
+                elif status == "SLOW":
+                    car_speed = 10
+                else:
+                    car_speed = 30
 
-            # overlay status + speed text
-            cv2.putText(img_det, f"STATUS: {status}", (20,40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,0,255), 3)
-            cv2.putText(img_det, f"SPEED: {car_speed} km/h", (20,80),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,0), 2)
+                # overlay bounding box with distance info
+                label = f"{names[int(cls)]} {distance}m"
+                plot_one_box(xyxy, img_det, label=label, color=colors[int(cls)], line_thickness=2)
+
+            # overlay status + speed text on feed
+            cv2.putText(img_det, f"STATUS: {status}", (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+            cv2.putText(img_det, f"SPEED: {car_speed} km/h", (20, 80),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
 
         
         if dataset.mode == 'images':
