@@ -163,6 +163,9 @@ def detect(cfg,opt):
                 # overlay bounding box with distance info
                 label = f"{names[int(cls)]} {distance}m"
                 plot_one_box(xyxy, img_det, label=label, color=colors[int(cls)], line_thickness=2)
+                x1, y1 = int(xyxy[0]), int(xyxy[1]) - 10  # top-left of box
+                cv2.putText(img_det, label, (x1, y1),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
             # overlay status + speed text on feed
             cv2.putText(img_det, f"STATUS: {status}", (20, 40),
