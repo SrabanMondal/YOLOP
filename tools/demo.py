@@ -133,9 +133,38 @@ def detect(cfg,opt):
 
         if len(det):
             det[:,:4] = scale_coords(img.shape[2:],det[:,:4],img_det.shape).round()
+            status = "NORMAL"
+            STOP_TH = 8    # meters
+            SLOW_TH = 15   # meters
+            car_speed = 30 # km/h demo value
+
             for *xyxy,conf,cls in reversed(det):
+                # original label
                 label_det_pred = f'{names[int(cls)]} {conf:.2f}'
-                plot_one_box(xyxy, img_det , label=label_det_pred, color=colors[int(cls)], line_thickness=2)
+
+                # crude distance estimation from bbox height
+                h_pixels = xyxy[3] - xyxy[1]
+                if h_pixels > 0:
+                    distance = int((1.6 * 700) / h_pixels)  # assume avg car height=1.6m, focal=700
+                else:
+                    distance = 999
+
+                # update status based on distance
+                if distance < STOP_TH:
+                    status = "STOP"
+                elif distance < SLOW_TH and status != "STOP":
+                    status = "SLOW"
+
+                # draw bbox + distance
+                plot_one_box(xyxy, img_det , label=f"{names[int(cls)]} {distance}m", 
+                            color=colors[int(cls)], line_thickness=2)
+
+            # overlay status + speed text
+            cv2.putText(img_det, f"STATUS: {status}", (20,40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,0,255), 3)
+            cv2.putText(img_det, f"SPEED: {car_speed} km/h", (20,80),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,0), 2)
+
         
         if dataset.mode == 'images':
             cv2.imwrite(save_path,img_det)
