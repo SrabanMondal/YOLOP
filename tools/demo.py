@@ -110,6 +110,37 @@ def detect(cfg,opt):
 
         _, _, height, width = img.shape
         h,w,_=img_det.shape
+        # ------------------ ROI (trapezium) definition and drawing ------------------
+        # define trapezoid ROI: wide at bottom, narrow at top
+        # tune these ratios as needed
+        roi_bottom_width_ratio = 0.90   # fraction of frame width at bottom
+        roi_top_width_ratio = 0.40      # fraction of frame width at top
+        roi_bottom_y_ratio = 0.95       # how low is the bottom (near frame bottom)
+        roi_top_y_ratio = 0.45          # how high is the top (towards horizon)
+
+        cx = w // 2
+        bw = int(w * roi_bottom_width_ratio)
+        tw = int(w * roi_top_width_ratio)
+        by = int(h * roi_bottom_y_ratio)
+        ty = int(h * roi_top_y_ratio)
+
+        roi_pts = np.array([
+            [cx - bw // 2, by],    # bottom-left
+            [cx + bw // 2, by],    # bottom-right
+            [cx + tw // 2, ty],    # top-right
+            [cx - tw // 2, ty],    # top-left
+        ], dtype=np.int32)
+
+        # draw filled semi-transparent ROI
+        overlay = img_det.copy()
+        alpha = 0.15  # transparency
+        cv2.fillPoly(overlay, [roi_pts], color=(0, 255, 0))  # light fill (green)
+        cv2.addWeighted(overlay, alpha, img_det, 1 - alpha, 0, img_det)
+
+        # draw boundary strongly so it's visible
+        cv2.polylines(img_det, [roi_pts], isClosed=True, color=(0, 200, 255), thickness=2)  # orange-ish border
+        # ---------------------------------------------------------------------------
+
         pad_w, pad_h = shapes[1][1]
         pad_w = int(pad_w)
         pad_h = int(pad_h)
@@ -146,7 +177,7 @@ def detect(cfg,opt):
                 img_det,
                 (int(w/2), h - 50),
                 (int(w/2 + deviation), h - 200),
-                (0, 255, 0),
+                (255, 0, 0),
                 5,
                 tipLength=0.4,
             )
@@ -171,34 +202,76 @@ def detect(cfg,opt):
             SLOW_TH = 15   # meters
             car_speed = 30 # km/h demo value (default normal)
 
+            # prepare active detection list (inside ROI)
+            active_dets = []
+            inactive_dets = []
+
+            # iterate detections and split by ROI membership
             for *xyxy, conf, cls in reversed(det):
-                # crude distance estimation (single camera formula)
-                h_pixels = xyxy[3] - xyxy[1]  # bbox height
+                x1, y1, x2, y2 = map(int, xyxy)
+                bx = int((x1 + x2) / 2)
+                by_box = int(y2)  # bottom center of bbox
+
+                # check if bottom-center point is inside ROI polygon
+                inside = cv2.pointPolygonTest(roi_pts, (bx, by_box), False) >= 0
+
+                if inside:
+                    active_dets.append((x1, y1, x2, y2, conf, int(cls)))
+                else:
+                    inactive_dets.append((x1, y1, x2, y2, conf, int(cls)))
+
+            # Now process only active_dets for STOP / SLOW decisions (closest object)
+            status = "NORMAL"
+            car_speed = 30  # default
+            closest_dist = 999
+            closest_obj = None
+
+            # first compute distances for active detections and choose the closest
+            for (x1, y1, x2, y2, conf, cls_id) in active_dets:
+                h_pixels = (y2 - y1)
                 if h_pixels > 0:
-                    distance = int((1.6 * 700) / h_pixels)  # 1.6m avg car height, focal=700 px
+                    distance = int((1.6 * 700) / h_pixels)
                 else:
                     distance = 999
 
-                # update driving status based on closest object
-                if distance < STOP_TH:
+                if distance < closest_dist:
+                    closest_dist = distance
+                    closest_obj = dict(cls=cls_id, dist=distance, bbox=(x1, y1, x2, y2))
+
+            # decision thresholds (meters)
+            if closest_obj is not None:
+                if closest_obj['dist'] < STOP_TH:
                     status = "STOP"
-                elif distance < SLOW_TH and status != "STOP":
+                elif closest_obj['dist'] < SLOW_TH:
                     status = "SLOW"
-
-                # dynamic speed update for demo
-                if status == "STOP":
-                    car_speed = 0
-                elif status == "SLOW":
-                    car_speed = 10
                 else:
-                    car_speed = 30
+                    status = "NORMAL"
+            else:
+                status = "NORMAL"
 
-                # overlay bounding box with distance info
-                label = f"{names[int(cls)]} {distance}m"
-                plot_one_box(xyxy, img_det, label=label, color=colors[int(cls)], line_thickness=2)
-                x1, y1 = int(xyxy[0]), int(xyxy[1]) - 10  # top-left of box
-                cv2.putText(img_det, label, (x1, y1),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+            # dynamic speed update
+            if status == "STOP":
+                car_speed = 0
+            elif status == "SLOW":
+                car_speed = 10
+            else:
+                car_speed = 30
+
+            # draw active detections with normal color and label, and draw inactive in faded style
+            for (x1, y1, x2, y2, conf, cls_id) in active_dets:
+                label = f"{names[int(cls_id)]} {int((1.6 * 700) / max(1, (y2-y1)))}m"
+                plot_one_box([x1, y1, x2, y2], img_det, label=label, color=colors[int(cls_id)], line_thickness=2)
+                cv2.putText(img_det, label, (x1, y1 - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
+
+            # draw inactive (outside ROI) in faded gray so user sees them but they don't affect decisions
+            for (x1, y1, x2, y2, conf, cls_id) in inactive_dets:
+                # faded rectangle
+                cv2.rectangle(img_det, (x1, y1), (x2, y2), (160, 160, 160), 1)
+                # small gray label
+                cv2.putText(img_det, f"{names[int(cls_id)]}", (x1, max(10, y1 - 10)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (160, 160, 160), 1)
+
 
             # overlay status + speed text on feed
             cv2.putText(img_det, f"STATUS: {status}", (20, 40),
