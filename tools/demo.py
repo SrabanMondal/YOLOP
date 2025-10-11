@@ -124,12 +124,12 @@ def detect(cfg,opt):
         # get coordinates of driveable pixels
         ys, xs = np.where(da_seg_mask == 1)
         if len(xs) > 0:
+            mean_x = np.mean(xs)
             path_points.append((int(mean_x), int(np.mean(ys))))
             if len(path_points) > 20:  # limit trail
                 path_points.pop(0)
             for p in path_points:
                 cv2.circle(img_det, p, 4, (255, 0, 0), -1)
-            mean_x = np.mean(xs)
             center_frame = da_seg_mask.shape[1] / 2
             deviation = mean_x - center_frame
 
