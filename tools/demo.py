@@ -39,7 +39,7 @@ transform=transforms.Compose([
 
 
 def detect(cfg,opt):
-
+    path_points = []
     logger, _, _ = create_logger(
         cfg, cfg.LOG_DIR, 'demo')
 
@@ -120,6 +120,38 @@ def detect(cfg,opt):
         _, da_seg_mask = torch.max(da_seg_mask, 1)
         da_seg_mask = da_seg_mask.int().squeeze().cpu().numpy()
         # da_seg_mask = morphological_process(da_seg_mask, kernel_size=7)
+        # --- Steering Direction Estimation ---
+        # get coordinates of driveable pixels
+        ys, xs = np.where(da_seg_mask == 1)
+        if len(xs) > 0:
+            path_points.append((int(mean_x), int(np.mean(ys))))
+            if len(path_points) > 20:  # limit trail
+                path_points.pop(0)
+            for p in path_points:
+                cv2.circle(img_det, p, 4, (255, 0, 0), -1)
+            mean_x = np.mean(xs)
+            center_frame = da_seg_mask.shape[1] / 2
+            deviation = mean_x - center_frame
+
+            if abs(deviation) < 20:
+                steering = "STRAIGHT"
+            elif deviation > 20:
+                steering = "RIGHT"
+            else:
+                steering = "LEFT"
+
+            # visualize steering line
+            h, w = img_det.shape[:2]
+            cv2.arrowedLine(
+                img_det,
+                (int(w/2), h - 50),
+                (int(w/2 + deviation), h - 200),
+                (0, 255, 0),
+                5,
+                tipLength=0.4,
+            )
+        else:
+            steering = "UNKNOWN"
 
         
         ll_predict = ll_seg_out[:, :,pad_h:(height-pad_h),pad_w:(width-pad_w)]
@@ -173,6 +205,9 @@ def detect(cfg,opt):
                         cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
             cv2.putText(img_det, f"SPEED: {car_speed} km/h", (20, 80),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+            # overlay steering info
+            cv2.putText(img_det, f"STEER: {steering}", (20, 120),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
         
         if dataset.mode == 'images':
