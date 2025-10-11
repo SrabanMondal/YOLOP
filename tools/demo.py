@@ -114,7 +114,7 @@ def detect(cfg,opt):
         # define trapezoid ROI: wide at bottom, narrow at top
         # tune these ratios as needed
         roi_bottom_width_ratio = 0.90   # fraction of frame width at bottom
-        roi_top_width_ratio = 0.40      # fraction of frame width at top
+        roi_top_width_ratio = 0.25      # fraction of frame width at top
         roi_bottom_y_ratio = 0.95       # how low is the bottom (near frame bottom)
         roi_top_y_ratio = 0.45          # how high is the top (towards horizon)
 
