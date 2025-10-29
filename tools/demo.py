@@ -236,10 +236,16 @@ def detect(cfg,opt):
                     [x1, y2]
                 ], dtype=np.int32)
                 roi_crop = roi_mask[y1:y2, x1:x2]
-                # inside = np.any(roi_crop > 0)
-                inside = cv2.intersectConvexConvex(bbox_poly.astype(np.float32), roi_pts.astype(np.float32))[0] > 0
+                inside1 = np.any(roi_crop > 0)
+                ret = cv2.intersectConvexConvex(
+                    bbox_poly.astype(np.float32),
+                    roi_pts.astype(np.float32)
+                )
+                intersect_area = ret[0] if ret and ret[0] is not None else 0
+                inside2 = intersect_area > 50
+                inside3 = cv2.intersectConvexConvex(bbox_poly.astype(np.float32), roi_pts.astype(np.float32))[0] > 0
 
-                if inside:
+                if inside1 or inside2 or inside3:
                     active_dets.append((x1, y1, x2, y2, conf, int(cls_id)))
                 else:
                     inactive_dets.append((x1, y1, x2, y2, conf, int(cls_id)))
