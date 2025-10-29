@@ -229,9 +229,15 @@ def detect(cfg,opt):
                 x1, y1, x2, y2 = map(int, xyxy)
                 x1, y1 = max(0, x1), max(0, y1)
                 x2, y2 = min(w - 1, x2), min(h - 1, y2)
+                bbox_poly = np.array([
+                    [x1, y1],
+                    [x2, y1],
+                    [x2, y2],
+                    [x1, y2]
+                ], dtype=np.int32)
                 roi_crop = roi_mask[y1:y2, x1:x2]
-                inside = np.any(roi_crop > 0)
-
+                # inside = np.any(roi_crop > 0)
+                inside = cv2.intersectConvexConvex(bbox_poly.astype(np.float32), roi_pts.astype(np.float32))[0] > 0
 
                 if inside:
                     active_dets.append((x1, y1, x2, y2, conf, int(cls_id)))
