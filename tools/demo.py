@@ -30,7 +30,7 @@ from lib.core.postprocess import morphological_process, connect_lane
 from tqdm import tqdm
 from ultralytics import YOLO
 
-model_det = YOLO("tools/yolo11s.pt")
+model_det = YOLO("tools/yolov8s.pt")
 normalize = transforms.Normalize(
         mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
     )
