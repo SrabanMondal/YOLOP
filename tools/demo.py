@@ -126,7 +126,7 @@ def detect(cfg,opt):
         roi_bottom_width_ratio = 0.92   # fraction of frame width at bottom
         roi_top_width_ratio = 0.30     # fraction of frame width at top
         roi_bottom_y_ratio = 0.94       # how low is the bottom (near frame bottom)
-        roi_top_y_ratio = 0.50         # how high is the top (towards horizon)
+        roi_top_y_ratio = 0.30         # how high is the top (towards horizon)
 
         cx = w // 2
         bw = int(w * roi_bottom_width_ratio)
