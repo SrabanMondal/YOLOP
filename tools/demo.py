@@ -84,17 +84,6 @@ def detect(cfg,opt):
     inf_time = AverageMeter()
     nms_time = AverageMeter()
     
-    # route of car
-    route_plan = [
-        (100, 0),     # go straight 100m
-        (0, 90),      # left turn at 100m
-        (30, 0),      # small roundabout zone
-        (0, 30),      # 30° left after roundabout
-        (100, 0),     # straight till end
-    ]
-    current_step = 0
-    distance_travelled = 0
-    
     for i, (path, img, img_det, vid_cap,shapes) in tqdm(enumerate(dataset),total = len(dataset)):
         img = transform(img).to(device)
         img = img.half() if half else img.float()  # uint8 to fp16/32
@@ -192,41 +181,6 @@ def detect(cfg,opt):
                 5,
                 tipLength=0.4,
             )
-            # ------------------ Route Guidance Overlay ------------------
-            # simulate distance travel
-            distance_travelled += 1  # assume each frame = 1m
-
-            # check if we reached next route segment
-            if current_step < len(route_plan) - 1:
-                if distance_travelled >= route_plan[current_step][0]:
-                    current_step += 1
-                    distance_travelled = 0
-
-            # get current turn angle
-            _, route_angle = route_plan[current_step]
-
-            # convert angle to visual arrow direction
-            arrow_len = 150
-            angle_rad = np.deg2rad(-route_angle)  # invert for screen coordinates
-
-            # arrow base (bottom center)
-            base_x, base_y = int(w / 2), h - 100
-            end_x = int(base_x + arrow_len * np.sin(angle_rad))
-            end_y = int(base_y - arrow_len * np.cos(angle_rad))
-
-            # draw red arrow for route direction
-            cv2.arrowedLine(
-                img_det,
-                (base_x, base_y),
-                (end_x, end_y),
-                (0, 0, 255),
-                8,
-                tipLength=0.3,
-            )
-            cv2.putText(img_det, f"ROUTE: {route_angle} deg", (base_x - 120, base_y - 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-            # -------------------------------------------------------------
-
         else:
             steering = "UNKNOWN"
 
