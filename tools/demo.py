@@ -28,6 +28,9 @@ from lib.utils import plot_one_box,show_seg_result
 from lib.core.function import AverageMeter
 from lib.core.postprocess import morphological_process, connect_lane
 from tqdm import tqdm
+from ultralytics import YOLO
+
+model_det = YOLO("yolo11x.pt")
 normalize = transforms.Normalize(
         mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
     )
@@ -126,7 +129,7 @@ def detect(cfg,opt):
         roi_bottom_width_ratio = 0.92   # fraction of frame width at bottom
         roi_top_width_ratio = 0.30     # fraction of frame width at top
         roi_bottom_y_ratio = 0.94       # how low is the bottom (near frame bottom)
-        roi_top_y_ratio = 0.30         # how high is the top (towards horizon)
+        roi_top_y_ratio = 0.37         # how high is the top (towards horizon)
 
         cx = w // 2
         bw = int(w * roi_bottom_width_ratio)
@@ -207,8 +210,12 @@ def detect(cfg,opt):
         img_det = show_seg_result(img_det, (da_seg_mask, ll_seg_mask), _, _, is_demo=True)
 
         # ------------------ Object Detection + Decisions ------------------
-        if len(det):
-            det[:,:4] = scale_coords(img.shape[2:], det[:,:4], img_det.shape).round()
+        rgb_frame = cv2.cvtColor(img_det, cv2.COLOR_BGR2RGB)
+        results = model_det.predict(rgb_frame, conf=0.5, verbose=False)
+        boxes = results[0].boxes.xyxy.cpu().numpy()  # x1, y1, x2, y2
+        confs = results[0].boxes.conf.cpu().numpy()
+        classes = results[0].boxes.cls.cpu().numpy()
+        if results:
             status = "NORMAL"
             
             # Thresholds & defaults
@@ -221,7 +228,7 @@ def detect(cfg,opt):
             inactive_dets = []
 
             # iterate detections and split by ROI membership
-            for *xyxy, conf, cls in reversed(det):
+            for (xyxy, conf, cls_id) in zip(boxes, confs, classes):
                 x1, y1, x2, y2 = map(int, xyxy)
                 x1, y1 = max(0, x1), max(0, y1)
                 x2, y2 = min(w - 1, x2), min(h - 1, y2)
@@ -230,9 +237,9 @@ def detect(cfg,opt):
 
 
                 if inside:
-                    active_dets.append((x1, y1, x2, y2, conf, int(cls)))
+                    active_dets.append((x1, y1, x2, y2, conf, int(cls_id)))
                 else:
-                    inactive_dets.append((x1, y1, x2, y2, conf, int(cls)))
+                    inactive_dets.append((x1, y1, x2, y2, conf, int(cls_id)))
 
             # Closest object distance (active detections only)
             closest_dist = 999
