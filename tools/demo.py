@@ -75,9 +75,6 @@ def detect(cfg,opt):
 
 
     # ---------- Class Names & Colors ----------
-    names = model.module.names if hasattr(model, 'module') else model.names
-    print(names)
-    colors = [[random.randint(0, 255) for _ in range(3)] for _ in range(len(names))]
 
 
     # Run inference
@@ -226,7 +223,7 @@ def detect(cfg,opt):
              # Active vs Inactive detections
             active_dets = []
             inactive_dets = []
-
+            det_names = model_det.names
             # iterate detections and split by ROI membership
             for (xyxy, conf, cls_id) in zip(boxes, confs, classes):
                 x1, y1, x2, y2 = map(int, xyxy)
@@ -278,17 +275,20 @@ def detect(cfg,opt):
 
             # draw active detections with normal color and label, and draw inactive in faded style
             for (x1, y1, x2, y2, conf, cls_id) in active_dets:
-                label = f"{names[int(cls_id)]} {int((1.6 * 700) / max(1, (y2-y1)))}m"
-                plot_one_box([x1, y1, x2, y2], img_det, label=label, color=colors[int(cls_id)], line_thickness=2)
+                cls_name = det_names.get(int(cls_id), f"id{int(cls_id)}")
+                distance_m = int((1.6 * 700) / max(1, (y2 - y1)))
+                label = f"{cls_name} {distance_m}m"
+                plot_one_box([x1, y1, x2, y2], img_det, label=label, color=(0,255,0), line_thickness=2)
                 cv2.putText(img_det, label, (x1, y1 - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
 
             # draw inactive (outside ROI) in faded gray so user sees them but they don't affect decisions
             for (x1, y1, x2, y2, conf, cls_id) in inactive_dets:
+                cls_name = det_names.get(int(cls_id), f"id{int(cls_id)}")
                 # faded rectangle
                 cv2.rectangle(img_det, (x1, y1), (x2, y2), (160, 160, 160), 1)
                 # small gray label
-                cv2.putText(img_det, f"{names[int(cls_id)]}", (x1, max(10, y1 - 10)),
+                cv2.putText(img_det, cls_name, (x1, max(10, y1 - 10)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (160, 160, 160), 1)
 
 
