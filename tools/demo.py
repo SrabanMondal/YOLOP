@@ -39,17 +39,21 @@ transform=transforms.Compose([
 
 
 def detect(cfg,opt):
+    
+    # ---------- Setup ----------
     path_points = []
     logger, _, _ = create_logger(
         cfg, cfg.LOG_DIR, 'demo')
 
     device = select_device(logger,opt.device)
+    half = device.type != 'cpu'  # half precision only supported on CUDA
+    
+    # ---------- Output Folder ----------
     if os.path.exists(opt.save_dir):  # output dir
         shutil.rmtree(opt.save_dir)  # delete dir
     os.makedirs(opt.save_dir)  # make new dir
-    half = device.type != 'cpu'  # half precision only supported on CUDA
 
-    # Load model
+    # ---------- Load YOLOP Model ----------
     model = get_net(cfg)
     checkpoint = torch.load(opt.weights, map_location= device)
     model.load_state_dict(checkpoint['state_dict'])
@@ -57,7 +61,7 @@ def detect(cfg,opt):
     if half:
         model.half()  # to FP16
 
-    # Set Dataloader
+    # ---------- Dataset (Image/Video/Stream) ----------
     if opt.source.isnumeric():
         cudnn.benchmark = True  # set True to speed up constant image size inference
         dataset = LoadStreams(opt.source, img_size=opt.img_size)
@@ -67,7 +71,7 @@ def detect(cfg,opt):
         bs = 1  # batch_size
 
 
-    # Get names and colors
+    # ---------- Class Names & Colors ----------
     names = model.module.names if hasattr(model, 'module') else model.names
     print(names)
     colors = [[random.randint(0, 255) for _ in range(3)] for _ in range(len(names))]
@@ -80,43 +84,49 @@ def detect(cfg,opt):
     img = torch.zeros((1, 3, opt.img_size, opt.img_size), device=device)  # init img
     _ = model(img.half() if half else img) if device.type != 'cpu' else None  # run once
     model.eval()
-
     inf_time = AverageMeter()
     nms_time = AverageMeter()
     
     for i, (path, img, img_det, vid_cap,shapes) in tqdm(enumerate(dataset),total = len(dataset)):
+        
+        # ---------- Preprocess ----------
         img = transform(img).to(device)
         img = img.half() if half else img.float()  # uint8 to fp16/32
         if img.ndimension() == 3:
             img = img.unsqueeze(0)
-        # Inference
+            
+        # ============================================================
+        #  YOLOP INFERENCE (Original)
+        # ============================================================
         t1 = time_synchronized()
         det_out, da_seg_out,ll_seg_out= model(img)
         t2 = time_synchronized()
-        # if i == 0:
-        #     print(det_out)
+    
         inf_out, _ = det_out
         inf_time.update(t2-t1,img.size(0))
 
-        # Apply NMS
+        # ---------- Apply NMS ----------
         t3 = time_synchronized()
         det_pred = non_max_suppression(inf_out, conf_thres=opt.conf_thres, iou_thres=opt.iou_thres, classes=None, agnostic=False)
         t4 = time_synchronized()
 
         nms_time.update(t4-t3,img.size(0))
         det=det_pred[0]
-
+        
+        # ---------- Output Path ----------
         save_path = str(opt.save_dir +'/'+ Path(path).name) if dataset.mode != 'stream' else str(opt.save_dir + '/' + "web.mp4")
+        
+        # ============================================================
+        #  CUSTOM LOGIC SECTION START
+        # ============================================================
 
+        # ------------------ ROI (trapezium) ------------------
         _, _, height, width = img.shape
-        h,w,_=img_det.shape
-        # ------------------ ROI (trapezium) definition and drawing ------------------
-        # define trapezoid ROI: wide at bottom, narrow at top
-        # tune these ratios as needed
-        roi_bottom_width_ratio = 0.90   # fraction of frame width at bottom
-        roi_top_width_ratio = 0.25      # fraction of frame width at top
-        roi_bottom_y_ratio = 0.95       # how low is the bottom (near frame bottom)
-        roi_top_y_ratio = 0.45          # how high is the top (towards horizon)
+        h      ,w,     _    =img_det.shape
+        roi_bottom_width_ratio = 0.92   # fraction of frame width at bottom
+        roi_top_width_ratio = 0.30     # fraction of frame width at top
+        roi_bottom_y_ratio = 0.94       # how low is the bottom (near frame bottom)
+        roi_top_y_ratio = 0.50         # how high is the top (towards horizon)
 
         cx = w // 2
         bw = int(w * roi_bottom_width_ratio)
@@ -136,11 +146,12 @@ def detect(cfg,opt):
         alpha = 0.15  # transparency
         cv2.fillPoly(overlay, [roi_pts], color=(0, 255, 0))  # light fill (green)
         cv2.addWeighted(overlay, alpha, img_det, 1 - alpha, 0, img_det)
-
-        # draw boundary strongly so it's visible
         cv2.polylines(img_det, [roi_pts], isClosed=True, color=(0, 200, 255), thickness=2)  # orange-ish border
+        roi_mask = np.zeros((h,w), dtype=np.uint8)
+        cv2.fillPoly(roi_mask, [roi_pts], 255)
         # ---------------------------------------------------------------------------
 
+        # ------------------ Drivable Area Mask ------------------
         pad_w, pad_h = shapes[1][1]
         pad_w = int(pad_w)
         pad_h = int(pad_h)
@@ -151,8 +162,8 @@ def detect(cfg,opt):
         _, da_seg_mask = torch.max(da_seg_mask, 1)
         da_seg_mask = da_seg_mask.int().squeeze().cpu().numpy()
         # da_seg_mask = morphological_process(da_seg_mask, kernel_size=7)
+        
         # --- Steering Direction Estimation ---
-        # get coordinates of driveable pixels
         ys, xs = np.where(da_seg_mask == 1)
         if len(xs) > 0:
             mean_x = np.mean(xs)
@@ -171,7 +182,6 @@ def detect(cfg,opt):
             else:
                 steering = "LEFT"
 
-            # visualize steering line
             h, w = img_det.shape[:2]
             cv2.arrowedLine(
                 img_det,
@@ -183,8 +193,9 @@ def detect(cfg,opt):
             )
         else:
             steering = "UNKNOWN"
+        # --------------------------------------------------------
 
-        
+        # ------------------ Lane Line Mask ------------------
         ll_predict = ll_seg_out[:, :,pad_h:(height-pad_h),pad_w:(width-pad_w)]
         ll_seg_mask = torch.nn.functional.interpolate(ll_predict, scale_factor=int(1/ratio), mode='bilinear')
         _, ll_seg_mask = torch.max(ll_seg_mask, 1)
@@ -195,34 +206,35 @@ def detect(cfg,opt):
 
         img_det = show_seg_result(img_det, (da_seg_mask, ll_seg_mask), _, _, is_demo=True)
 
+        # ------------------ Object Detection + Decisions ------------------
         if len(det):
             det[:,:4] = scale_coords(img.shape[2:], det[:,:4], img_det.shape).round()
             status = "NORMAL"
+            
+            # Thresholds & defaults
             STOP_TH = 8    # meters
             SLOW_TH = 15   # meters
             car_speed = 30 # km/h demo value (default normal)
 
-            # prepare active detection list (inside ROI)
+             # Active vs Inactive detections
             active_dets = []
             inactive_dets = []
 
             # iterate detections and split by ROI membership
             for *xyxy, conf, cls in reversed(det):
                 x1, y1, x2, y2 = map(int, xyxy)
-                bx = int((x1 + x2) / 2)
-                by_box = int(y2)  # bottom center of bbox
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w - 1, x2), min(h - 1, y2)
+                roi_crop = roi_mask[y1:y2, x1:x2]
+                inside = np.any(roi_crop > 0)
 
-                # check if bottom-center point is inside ROI polygon
-                inside = cv2.pointPolygonTest(roi_pts, (bx, by_box), False) >= 0
 
                 if inside:
                     active_dets.append((x1, y1, x2, y2, conf, int(cls)))
                 else:
                     inactive_dets.append((x1, y1, x2, y2, conf, int(cls)))
 
-            # Now process only active_dets for STOP / SLOW decisions (closest object)
-            status = "NORMAL"
-            car_speed = 30  # default
+            # Closest object distance (active detections only)
             closest_dist = 999
             closest_obj = None
 
@@ -281,7 +293,12 @@ def detect(cfg,opt):
             # overlay steering info
             cv2.putText(img_det, f"STEER: {steering}", (20, 120),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        
+        # --------------------------------------------------------
+        #  CUSTOM LOGIC SECTION END 🧠✅
+        # ============================================================
 
+        # ---------- Output Writing ----------
         
         if dataset.mode == 'images':
             cv2.imwrite(save_path,img_det)
