@@ -368,7 +368,7 @@ def detect(cfg, opt):
                 fps = vid_cap.get(cv2.CAP_PROP_FPS)
                 if not isinstance(fps, (int, float)) or fps < 1:    
                     fps = 30.0 # Default fallback
-                vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*fourcc), fps, (w, h))
+                vid_writer = cv2.VideoWriter(save_path, fourcc, fps, (w, h))
             if img_det.shape[0] != h or img_det.shape[1] != w:
                 img_det = img_det[:h, :w]
             vid_writer.write(img_det)
