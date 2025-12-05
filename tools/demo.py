@@ -41,76 +41,81 @@ transform=transforms.Compose([
 # ============================================================
 #  MODULAR ROI FUNCTIONS
 # ============================================================
-
 def get_roi_polygon(h, w):
     """
-    Returns the points for the trapezoidal Region of Interest.
-    Updated for curves: Higher horizon (0.4) and wider top corners.
+    Creates a trapezium that spans the full bottom width of the screen.
     """
-    # Configuration
-    top_y_ratio = 0.40      # Horizon height (40% down from top)
-    bot_y_ratio = 1.0       # Bottom of screen
+    # ---------------------------------------------------------
+    # ROI CONFIGURATION
+    # ---------------------------------------------------------
     
-    top_x_margin = 0.20     # 20% margin on left/right at the top
-    bot_x_margin = 0.0      # 0% margin at bottom (full width)
+    # 1. Horizontal Shift (0 = Centered)
+    #    Change this ONLY if your camera is not in the middle of the car.
+    horizontal_offset = 0  
+
+    # 2. Vertical Horizon (Where the road vanishes)
+    #    0.40 = Horizon is at 40% from the top
+    top_y_ratio = 0.40
     
-    # Calculate Coordinates
+    # 3. Bottom Cutoff (Car Hood)
+    #    1.0 = Go all the way to the bottom of the screen
+    bot_y_ratio = 1.0
+    
+    # 4. Width Ratios
+    #    0.40 = Top is 40% of image width (The far end of the road)
+    #    1.00 = Bottom is 100% of image width (The near end)
+    top_width_percent = 0.40
+    bot_width_percent = 1.00 
+
+    # ---------------------------------------------------------
+
+    # Center Point
+    cx = (w // 2) + horizontal_offset
+    
+    # Heights
     top_y = int(h * top_y_ratio)
     bot_y = int(h * bot_y_ratio)
     
-    top_x_left  = int(w * top_x_margin)
-    top_x_right = int(w * (1 - top_x_margin))
+    # Widths
+    top_w_half = int((w * top_width_percent) / 2)
+    bot_w_half = int((w * bot_width_percent) / 2)
     
-    bot_x_left  = int(w * bot_x_margin)
-    bot_x_right = int(w * (1 - bot_x_margin))
+    # Calculate Points
+    # TL: Top-Left, TR: Top-Right
+    tl = (cx - top_w_half, top_y)
+    tr = (cx + top_w_half, top_y)
     
-    # Define Polygon (Bottom-Left -> Top-Left -> Top-Right -> Bottom-Right)
-    pts = np.array([
-        [bot_x_left, bot_y],
-        [top_x_left, top_y],
-        [top_x_right, top_y],
-        [bot_x_right, bot_y]
-    ], dtype=np.int32)
+    # BL: Bottom-Left, BR: Bottom-Right
+    # We clamp these to ensure they touch the edges 0 and w if width is 100%
+    bl_x = cx - bot_w_half
+    br_x = cx + bot_w_half
     
+    bl = (bl_x, bot_y)
+    br = (br_x, bot_y)
+    
+    # Define Polygon
+    pts = np.array([bl, tl, tr, br], dtype=np.int32)
     return pts
 
 def check_roi_intersection(box, roi_poly, img_dims):
-    """
-    Checks if a bounding box intersects with the ROI polygon.
-    box: [x1, y1, x2, y2]
-    """
+    """ Checks if a detected box touches the ROI polygon """
     h, w = img_dims
     x1, y1, x2, y2 = map(int, box)
     
-    # 1. Create Polygon for Bounding Box
-    box_poly = np.array([
-        [x1, y1], [x2, y1], [x2, y2], [x1, y2]
-    ], dtype=np.int32)
+    box_poly = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.int32)
     
-    # 2. Check for Intersection
-    # A simple way is to check if the box center is inside, 
-    # but intersecting polygons is more accurate for edge cases.
-    
-    # Create mask for ROI
     mask_roi = np.zeros((h, w), dtype=np.uint8)
     cv2.fillPoly(mask_roi, [roi_poly], 1)
     
-    # Create mask for Box
     mask_box = np.zeros((h, w), dtype=np.uint8)
     cv2.fillPoly(mask_box, [box_poly], 1)
     
-    # Logical AND
     overlap = cv2.bitwise_and(mask_roi, mask_box)
-    
-    # If any pixel overlaps, it's valid
     return np.count_nonzero(overlap) > 0
 
 def draw_roi_visuals(img, roi_poly):
-    """
-    Draws the ROI boundary on the image for visualization.
-    Color: Yellow
-    """
-    cv2.polylines(img, [roi_poly], isClosed=True, color=(0, 255, 255), thickness=2)
+    """ Draws the ROI boundary (Yellow) """
+    cv2.polylines(img, [roi_poly], isClosed=True, color=(0, 255, 255), thickness=3)
 
 # ============================================================
 #  UX/UI HELPER FUNCTIONS
