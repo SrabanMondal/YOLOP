@@ -95,39 +95,43 @@ def draw_hud_panel(img, status, speed, steering):
 
 def draw_3d_arrow(img, deviation):
     """
-    Draws a broad, 3D-style navigation arrow at the bottom of the screen.
-    The arrow points towards the calculated deviation.
+    Draws a broad, 3D-style navigation arrow.
+    Lifted higher up the screen to sit "on the road" for better visibility.
     """
     h, w = img.shape[:2]
     cx = w // 2
     
-    # Parameters for the arrow shape
-    base_y = h - 40        # Bottom of arrow (near screen bottom)
-    tip_y = h - 180        # Top tip of arrow
-    base_width = 70        # How wide the base is
-    notch_y = h - 80       # The inner V shape at the bottom
+    # --- Parameters for vertical position (LIFTED) ---
+    # We increase the offset from the bottom 'h' to lift it up.
+    # Adjust 'bottom_offset' if you need it even higher or lower.
+    bottom_offset = 250    
     
-    # Amplify the deviation for visual effect (so the arrow clearly turns)
+    base_y = h - bottom_offset   # The very bottom points of the arrow wings
+    notch_y = base_y - 50        # The inner V shape (slightly higher than base)
+    tip_y = base_y - 160         # The tip of the arrow (tallest point)
+    
+    base_width = 75        # Width of the wings from center
+    
+    # Amplify the deviation for visual effect
     visual_shift = int(deviation * 3.5) 
     
     # Define points: [Base Left, Tip, Base Right, Bottom Notch]
-    # We shift the Tip X based on deviation to simulate steering
     pt_tip = (cx + visual_shift, tip_y)
     pt_bl  = (cx - base_width, base_y)
     pt_br  = (cx + base_width, base_y)
-    pt_mid = (cx, notch_y) # The inner point creates the chevron shape
+    pt_mid = (cx, notch_y)
 
     triangle_cnt = np.array([pt_bl, pt_tip, pt_br, pt_mid], dtype=np.int32)
 
-    # 1. Draw Shadow (offset slightly) for 3D depth
-    shadow_cnt = triangle_cnt + 5
+    # 1. Draw Shadow (offset slightly for 3D depth)
+    shadow_cnt = triangle_cnt + 6
     cv2.fillPoly(img, [shadow_cnt], (0, 0, 0)) # Black shadow
     
     # 2. Draw Fill (Neon Cyan / Electric Blue)
     # Color format BGR: (255, 255, 0) is Cyan/Aqua
     cv2.fillPoly(img, [triangle_cnt], (255, 200, 0)) 
     
-    # 3. Draw Outline (White or Black to make it crisp)
+    # 3. Draw Outline (White to make it pop)
     cv2.polylines(img, [triangle_cnt], isClosed=True, color=(255, 255, 255), thickness=3)
 
 
