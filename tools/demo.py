@@ -342,6 +342,19 @@ def detect(cfg, opt):
 
         # D. Draw The Dashboard (HUD)
         draw_hud_panel(img_det, status, car_speed, steering)
+        h, w = img_det.shape[:2]
+        bottom_y = int(h * 0.92)
+        top_y    = int(h * 0.45)
+
+        bottom_left  = (0, bottom_y)
+        bottom_right = (w, bottom_y)
+
+        top_margin = int(w * 0.25)  # 25% inward from each side
+        top_left  = (top_margin, top_y)
+        top_right = (w - top_margin, top_y)
+
+        roi_pts = np.array([bottom_left, bottom_right, top_right, top_left], dtype=np.int32)
+
         cv2.polylines(img_det, [roi_pts], isClosed=True, color=(0, 255, 255), thickness=3)
 
         # ============================================================
