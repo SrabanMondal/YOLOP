@@ -78,7 +78,7 @@ def get_roi_polygon(h, w):
     br = (w, bot_y)     # Bottom Right Corner
     
     # Define Polygon
-    pts = np.array([bl, tl, tr, br], dtype=np.int32)
+    pts = np.array([tl, tr, br, bl], dtype=np.int32)
     return pts
 
 def check_roi_intersection(box, roi_poly, img_dims):
