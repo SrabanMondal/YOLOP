@@ -43,55 +43,39 @@ transform=transforms.Compose([
 # ============================================================
 def get_roi_polygon(h, w):
     """
-    Creates a trapezium that spans the full bottom width of the screen.
+    Creates a trapezium where:
+    - Bottom is strictly 0 to Width (Full Frame).
+    - Top is strictly centered.
     """
     # ---------------------------------------------------------
     # ROI CONFIGURATION
     # ---------------------------------------------------------
     
-    # 1. Horizontal Shift (0 = Centered)
-    #    Change this ONLY if your camera is not in the middle of the car.
-    horizontal_offset = 0  
-
-    # 2. Vertical Horizon (Where the road vanishes)
-    #    0.40 = Horizon is at 40% from the top
-    top_y_ratio = 0.40
+    # Vertical Heights
+    top_y_ratio = 0.40  # Horizon line (40% down)
+    bot_y_ratio = 1.00  # Bottom of frame (100% down)
     
-    # 3. Bottom Cutoff (Car Hood)
-    #    1.0 = Go all the way to the bottom of the screen
-    bot_y_ratio = 1.0
-    
-    # 4. Width Ratios
-    #    0.40 = Top is 40% of image width (The far end of the road)
-    #    1.00 = Bottom is 100% of image width (The near end)
+    # Top Width (Percentage of total screen width)
+    # 0.40 means the top of the trapezoid is 40% as wide as the screen
     top_width_percent = 0.40
-    bot_width_percent = 1.00 
 
     # ---------------------------------------------------------
 
-    # Center Point
-    cx = (w // 2) + horizontal_offset
-    
-    # Heights
+    # 1. Calculate Y coordinates
     top_y = int(h * top_y_ratio)
-    bot_y = int(h * bot_y_ratio)
+    bot_y = int(h * bot_y_ratio) - 1 # -1 to ensure it stays inside image memory
     
-    # Widths
+    # 2. Define TOP corners (Centered on Frame)
+    cx = w // 2
     top_w_half = int((w * top_width_percent) / 2)
-    bot_w_half = int((w * bot_width_percent) / 2)
     
-    # Calculate Points
-    # TL: Top-Left, TR: Top-Right
-    tl = (cx - top_w_half, top_y)
-    tr = (cx + top_w_half, top_y)
+    tl = (cx - top_w_half, top_y) # Top Left
+    tr = (cx + top_w_half, top_y) # Top Right
     
-    # BL: Bottom-Left, BR: Bottom-Right
-    # We clamp these to ensure they touch the edges 0 and w if width is 100%
-    bl_x = cx - bot_w_half
-    br_x = cx + bot_w_half
-    
-    bl = (bl_x, bot_y)
-    br = (br_x, bot_y)
+    # 3. Define BOTTOM corners (Hardcoded to Frame Edges)
+    # This prevents any "shifting" logic from affecting the bottom
+    bl = (0, bot_y)     # Bottom Left Corner
+    br = (w, bot_y)     # Bottom Right Corner
     
     # Define Polygon
     pts = np.array([bl, tl, tr, br], dtype=np.int32)
