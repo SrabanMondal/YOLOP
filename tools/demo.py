@@ -211,7 +211,7 @@ def detect(cfg, opt):
         nms_time.update(t4-t3, img.size(0))
         
         # ---------- Output Path ----------
-        save_path = str(opt.save_dir +'/'+ Path(path).name) if dataset.mode != 'stream' else str(opt.save_dir + '/' + "web.mp4")
+        save_path = str(opt.save_dir + '/' + "web.avi")
         
         # ============================================================
         #  CUSTOM LOGIC START
@@ -342,6 +342,8 @@ def detect(cfg, opt):
         # ============================================================
         #  OUTPUT WRITING
         # ============================================================
+        if not img_det.flags['C_CONTIGUOUS']:
+            img_det = np.ascontiguousarray(img_det)
         if dataset.mode == 'images':
             cv2.imwrite(save_path, img_det)
         elif dataset.mode == 'video':
@@ -349,9 +351,26 @@ def detect(cfg, opt):
                 vid_path = save_path
                 if isinstance(vid_writer, cv2.VideoWriter):
                     vid_writer.release()
-                fourcc = 'mp4v'
+                h, w = img_det.shape[:2]
+                
+                # 2. Ensure dimensions are even numbers (Codec requirement)
+                # If odd, we crop 1 pixel from the bottom/right to make it even
+                if w % 2 != 0 or h % 2 != 0:
+                    w = w - (w % 2)
+                    h = h - (h % 2)
+                    img_det = img_det[:h, :w] # Crop the frame to match new even dims
+
+                # 3. Codec Selection
+                # 'avc1' (H.264) is better for web/MP4. Fallback to 'mp4v' if needed.
+                # If getting errors on Kaggle, try 'MJPG' (but change extension to .avi)
+                fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+                # fourcc = 'mp4v'
                 fps = vid_cap.get(cv2.CAP_PROP_FPS)
+                if not isinstance(fps, (int, float)) or fps < 1:    
+                    fps = 30.0 # Default fallback
                 vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*fourcc), fps, (w, h))
+            if img_det.shape[0] != h or img_det.shape[1] != w:
+                img_det = img_det[:h, :w]
             vid_writer.write(img_det)
         else:
             cv2.imshow('image', img_det)
