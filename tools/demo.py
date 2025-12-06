@@ -333,7 +333,7 @@ def detect(cfg, opt):
         
         # Apply drive area mask
         img_det = show_seg_result(img_det, (da_seg_mask, ll_seg_mask), _, _, is_demo=True)
-        
+        h_draw, w_draw = img_det.shape[:2]
         # 1. Calculate ROI Polygon
         roi_poly = get_roi_polygon(h_draw, w_draw)
         
