@@ -189,7 +189,7 @@ class LaneCurvature:
 # ============================================================
 
 lane_curve = LaneCurvature(alpha=0.85)
-arrow_smoother = SmoothFilter(alpha=0.08)
+arrow_smoother = SmoothFilter(alpha=0.25)
 
 def detect(cfg, opt):
     logger, _, _ = create_logger(cfg, cfg.LOG_DIR, 'demo')
