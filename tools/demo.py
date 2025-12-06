@@ -17,7 +17,6 @@ from lib.config import cfg
 from lib.utils.utils import create_logger, select_device
 from lib.models import get_net
 from lib.dataset import LoadImages, LoadStreams
-from lib.utils import plot_one_box
 
 # Initialize Secondary Model
 model_det = YOLO("tools/yolov8s.pt")
@@ -31,10 +30,11 @@ transform = transforms.Compose([
         ])
 
 # ============================================================
-#  1. ROI & VISUALIZATION
+#  1. ROI & VISUALIZATION UTILS
 # ============================================================
 
 def get_roi_polygon(h, w):
+    """Returns the points for the trapezoidal ROI."""
     top_y = int(h * 0.40)
     bot_y = int(h * 1.00) - 1 
     center_x = w // 2
@@ -47,12 +47,38 @@ def get_roi_polygon(h, w):
     return np.array([bl, tl, tr, br], dtype=np.int32)
 
 def check_roi_intersection(box, roi_poly, h, w):
+    """Checks if an object box overlaps with the ROI polygon."""
     x1, y1, x2, y2 = map(int, box)
     mask_roi = np.zeros((h, w), dtype=np.uint8)
     cv2.fillPoly(mask_roi, [roi_poly], 1)
     mask_box = np.zeros((h, w), dtype=np.uint8)
     cv2.rectangle(mask_box, (x1, y1), (x2, y2), 1, -1)
     return np.count_nonzero(cv2.bitwise_and(mask_roi, mask_box)) > 0
+
+def draw_modern_box(img, box, label, color):
+    """Draws a clean box with a filled label background."""
+    x1, y1, x2, y2 = map(int, box)
+    cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+    
+    # Label
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    (w, h), _ = cv2.getTextSize(label, font, 0.5, 1)
+    cv2.rectangle(img, (x1, y1 - 20), (x1 + w + 10, y1), color, -1)
+    cv2.putText(img, label, (x1 + 5, y1 - 5), font, 0.5, (255, 255, 255), 1)
+
+def draw_lookahead_visuals(img, target_point, screen_center_x):
+    """Draws the crosshair/target and the reference center line."""
+    tx, ty = target_point
+    
+    # Draw Center Reference Line (Gray dashed lookalike)
+    cv2.line(img, (int(screen_center_x), ty - 20), (int(screen_center_x), ty + 20), (150, 150, 150), 2)
+    
+    # Draw Target Point (Pink/Magenta)
+    cv2.circle(img, (tx, ty), 8, (255, 0, 255), -1)
+    cv2.circle(img, (tx, ty), 12, (255, 0, 255), 2)
+    
+    # Draw connection line
+    cv2.line(img, (int(screen_center_x), ty), (tx, ty), (255, 0, 255), 1)
 
 def draw_hud_panel(img, status, speed, steering):
     h, w = img.shape[:2]
@@ -84,63 +110,54 @@ def draw_3d_arrow(img, deviation):
     base_y = h - 150   
     tip_y = base_y - 100         
     
-    # Scale deviation for visual impact (Look-ahead creates smaller numbers, so we scale up)
+    # Visual shift (clamped)
     visual_shift = int(deviation * 1.5) 
-    
-    # Clamp visual shift to keep arrow on screen
     visual_shift = max(-200, min(200, visual_shift))
 
     pts = np.array([
-        (cx - 40, base_y),          # Bottom Left
-        (cx + visual_shift, tip_y), # Tip (moves left/right)
-        (cx + 40, base_y),          # Bottom Right
-        (cx, base_y - 20)           # Notch
+        (cx - 40, base_y),          
+        (cx + visual_shift, tip_y), 
+        (cx + 40, base_y),          
+        (cx, base_y - 20)           
     ], dtype=np.int32)
 
     cv2.fillPoly(img, [pts + 4], (0, 0, 0)) # Shadow
-    cv2.fillPoly(img, [pts], (255, 100, 0)) # Blue/Cyan Fill
+    cv2.fillPoly(img, [pts], (255, 100, 0)) # Fill
     cv2.polylines(img, [pts], True, (255, 255, 255), 2) # Border
 
 # ============================================================
-#  2. MATH & SMOOTHING (CORE FIXES)
+#  2. MATH & LOGIC
 # ============================================================
 
 class SmoothFilter:
-    """Simple Exponential Moving Average for heavy damping"""
     def __init__(self, alpha=0.1):
         self.alpha = alpha
         self.val = 0
-
     def update(self, current):
         self.val = (self.alpha * current) + ((1 - self.alpha) * self.val)
         return self.val
 
 class LaneCurvature:
-    def __init__(self, alpha=0.9): # High alpha = Keep history (Very smooth curve)
+    def __init__(self, alpha=0.9): 
         self.alpha = alpha  
         self.avg_fit = None 
 
     def fit_and_smooth(self, mask_binary):
-        # 1. FIX: Keep only the largest contour (Remove noise blobs)
         contours, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours: return None, None
         
         largest_cnt = max(contours, key=cv2.contourArea)
-        if cv2.contourArea(largest_cnt) < 2000: return None, None # Ignore tiny fragments
+        if cv2.contourArea(largest_cnt) < 2000: return None, None 
 
-        # Draw only the largest chunk for calculation
         clean_mask = np.zeros_like(mask_binary)
         cv2.drawContours(clean_mask, [largest_cnt], -1, 1, thickness=cv2.FILLED)
-        
         y_idxs, x_idxs = np.where(clean_mask == 1)
 
-        # Fit Polynomial
         try:
             current_fit = np.polyfit(y_idxs, x_idxs, 2)
         except np.RankWarning:
             return None, None
 
-        # Smooth Coefficients
         if self.avg_fit is None:
             self.avg_fit = current_fit
         else:
@@ -149,53 +166,45 @@ class LaneCurvature:
         return self.avg_fit, (y_idxs, x_idxs)
 
     def calculate_deviation(self, fit, h, w):
-        if fit is None: return 0
+        if fit is None: return 0, (0,0)
         
-        # 2. FIX: Look-Ahead Logic
-        # Calculate X position at 60% of screen height (not bottom)
-        # This predicts where the road IS GOING.
-        lookahead_y = h * 0.60 
-        
-        target_x = fit[0]*(lookahead_y**2) + fit[1]*lookahead_y + fit[2]
+        # LOOK-AHEAD LOGIC: 60% of screen height
+        lookahead_y = int(h * 0.60)
+        target_x = int(fit[0]*(lookahead_y**2) + fit[1]*lookahead_y + fit[2])
         screen_center = w / 2
         
-        # Deviation: Negative = LEFT, Positive = RIGHT
         deviation = target_x - screen_center
-        return deviation
+        return deviation, (target_x, lookahead_y)
 
     def generate_plot_points(self, fit, h):
         if fit is None: return None
-        plot_y = np.linspace(h*0.4, h-1, h) # Only draw from horizon down
+        plot_y = np.linspace(h*0.4, h-1, h) 
         try:
             plot_x = fit[0]*plot_y**2 + fit[1]*plot_y + fit[2]
         except TypeError: return None
         return np.int32(np.array([np.transpose(np.vstack([plot_x, plot_y]))]))
 
 # ============================================================
-#  3. MAIN LOGIC
+#  3. MAIN LOOP
 # ============================================================
-# Smoothers
-lane_curve = LaneCurvature(alpha=0.85) # Smooths the polynomial line
-arrow_smoother = SmoothFilter(alpha=0.08) # Very heavy smoother for the UI Arrow (0.05 - 0.1)
+
+lane_curve = LaneCurvature(alpha=0.85)
+arrow_smoother = SmoothFilter(alpha=0.08)
 
 def detect(cfg, opt):
-    # Setup
     logger, _, _ = create_logger(cfg, cfg.LOG_DIR, 'demo')
     device = select_device(logger, opt.device)
     half = device.type != 'cpu'
     if os.path.exists(opt.save_dir): shutil.rmtree(opt.save_dir)
     os.makedirs(opt.save_dir)
 
-    # Load YOLOP
     model = get_net(cfg)
     model.load_state_dict(torch.load(opt.weights, map_location=device)['state_dict'])
     model = model.to(device).half() if half else model.float()
     model.eval()
 
-    # Load Data
     dataset = LoadStreams(opt.source, img_size=opt.img_size) if opt.source.isnumeric() else LoadImages(opt.source, img_size=opt.img_size)
     
-    # Warmup
     img = torch.zeros((1, 3, opt.img_size, opt.img_size), device=device)
     _ = model(img.half() if half else img)
 
@@ -205,90 +214,96 @@ def detect(cfg, opt):
         if isinstance(img_det, list): img_det = img_det[0]
         h_draw, w_draw = img_det.shape[:2]
 
-        # Inference
+        # 1. YOLOP INFERENCE
         img = transform(img).to(device).half() if half else transform(img).to(device).float()
         if img.ndimension() == 3: img = img.unsqueeze(0)
             
         with torch.no_grad():
             det_out, da_seg_out, ll_seg_out = model(img)
 
-        # Resizing Masks
         pad_w, pad_h = shapes[1][1]
         pad_w, pad_h = int(pad_w), int(pad_h)
         ratio = shapes[1][0][1]
         
-        # 1. Drivable Area (Green)
+        # Masks
         da_predict = da_seg_out[:, :, pad_h:(img.shape[2]-pad_h), pad_w:(img.shape[3]-pad_w)]
         da_seg_mask = torch.nn.functional.interpolate(da_predict, scale_factor=int(1/ratio), mode='bilinear')
         _, da_seg_mask = torch.max(da_seg_mask, 1)
         da_seg_mask = da_seg_mask.int().squeeze().cpu().numpy().astype(np.uint8)
         
-        # 2. Lane Lines (Cyan) - New Addition
         ll_predict = ll_seg_out[:, :, pad_h:(img.shape[2]-pad_h), pad_w:(img.shape[3]-pad_w)]
         ll_seg_mask = torch.nn.functional.interpolate(ll_predict, scale_factor=int(1/ratio), mode='bilinear')
         _, ll_seg_mask = torch.max(ll_seg_mask, 1)
         ll_seg_mask = ll_seg_mask.int().squeeze().cpu().numpy().astype(np.uint8)
 
-        # ----------------------------------------------------
-        # LOGIC & CALCULATIONS
-        # ----------------------------------------------------
-        
-        # Get smooth polynomial
+        # 2. LOGIC
         lane_fit, _ = lane_curve.fit_and_smooth(da_seg_mask)
-        
-        # Calculate Deviation using Look-Ahead
-        raw_deviation = lane_curve.calculate_deviation(lane_fit, h_draw, w_draw)
-        
-        # Apply Heavy Smoothing for the Arrow UI
+        raw_deviation, lookahead_pt = lane_curve.calculate_deviation(lane_fit, h_draw, w_draw)
         smooth_deviation = arrow_smoother.update(raw_deviation)
         
         steering = "STRAIGHT"
         if smooth_deviation > 25: steering = "RIGHT"
         elif smooth_deviation < -25: steering = "LEFT"
 
-        # YOLOv8 Object Detection
+        # 3. YOLOv8 OBJECTS
         rgb_frame = cv2.cvtColor(img_det, cv2.COLOR_BGR2RGB)
         roi_poly = get_roi_polygon(h_draw, w_draw)
         results = model_det.predict(rgb_frame, conf=0.5, verbose=False)
         boxes = results[0].boxes.xyxy.cpu().numpy()
+        classes = results[0].boxes.cls.cpu().numpy()
+        names = model_det.names
         
-        # Simple Logic for Distance/Status
-        active_dets = [b for b in boxes if check_roi_intersection(b, roi_poly, h_draw, w_draw)]
+        active_dets = []
+        inactive_dets = []
+        
+        for (xyxy, cls_id) in zip(boxes, classes):
+            if check_roi_intersection(xyxy, roi_poly, h_draw, w_draw):
+                active_dets.append((xyxy, int(cls_id)))
+            else:
+                inactive_dets.append((xyxy, int(cls_id)))
+
         closest_dist = 999
-        for x1, y1, x2, y2 in active_dets:
+        for (xyxy, cls_id) in active_dets:
+            x1, y1, x2, y2 = map(int, xyxy)
             dist = int((1.6 * 700) / max(1, (y2 - y1)))
             if dist < closest_dist: closest_dist = dist
             
         status = "STOP" if closest_dist < 8 else ("SLOW" if closest_dist < 15 else "NORMAL")
         speed = 0 if status == "STOP" else (10 if status == "SLOW" else 30)
 
-        # ----------------------------------------------------
-        # VISUALIZATION
-        # ----------------------------------------------------
-        
-        # Paint Road (Green)
+        # 4. DRAWING
+        # A. Masks
         color_mask = np.zeros_like(img_det)
         color_mask[da_seg_mask == 1] = [0, 255, 0] 
-        # Paint Lane Lines (Cyan) - Fixing Problem #4
-        color_mask[ll_seg_mask == 1] = [255, 255, 0] # Cyan in BGR
-        
+        color_mask[ll_seg_mask == 1] = [255, 255, 0]
         img_det = cv2.addWeighted(img_det, 1.0, color_mask, 0.4, 0)
 
-        # Paint Red Curve
+        # B. ROI Polygon
+        cv2.polylines(img_det, [roi_poly], True, (0, 255, 255), 2)
+
+        # C. Guidance Curve
         curve_pts = lane_curve.generate_plot_points(lane_fit, h_draw)
         if curve_pts is not None:
             cv2.polylines(img_det, [curve_pts], False, (0, 0, 255), 4)
+            # D. Lookahead Target (New)
+            draw_lookahead_visuals(img_det, lookahead_pt, w_draw/2)
 
-        # Paint Arrow (Using the HEAVY smoothed deviation)
+        # E. Object Boxes
+        for (xyxy, cls_id) in active_dets:
+            x1, y1, x2, y2 = map(int, xyxy)
+            dist = int((1.6 * 700) / max(1, (y2 - y1)))
+            label = f"{names[cls_id]} {dist}m"
+            draw_modern_box(img_det, xyxy, label, (0, 165, 255)) # Orange
+
+        for (xyxy, cls_id) in inactive_dets:
+            draw_modern_box(img_det, xyxy, names[cls_id], (120, 120, 120)) # Gray
+
+        # F. HUD & Arrow
         if lane_fit is not None:
             draw_3d_arrow(img_det, smooth_deviation)
-
-        # Paint HUD
         draw_hud_panel(img_det, status, speed, steering)
 
-        # ----------------------------------------------------
-        # SAVE
-        # ----------------------------------------------------
+        # 5. SAVE/SHOW
         if not img_det.flags['C_CONTIGUOUS']: img_det = np.ascontiguousarray(img_det)
         save_path = str(opt.save_dir + '/' + "web.avi")
         
@@ -313,7 +328,7 @@ def detect(cfg, opt):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', nargs='+', type=str, default='weights/End-to-end.pth', help='model.pth path(s)')
+    parser.add_argument('--weights', nargs='+', type=str, default='weights/End-to-end.pth', help='path to weights')
     parser.add_argument('--source', type=str, default='inference/videos', help='source') 
     parser.add_argument('--img-size', type=int, default=640, help='inference size (pixels)')
     parser.add_argument('--device', default='0', help='cuda device')
