@@ -296,9 +296,15 @@ def detect(cfg, opt):
         _, da_seg_mask = torch.max(da_seg_mask, 1)
         da_seg_mask = da_seg_mask.int().squeeze().cpu().numpy()
         
+        ll_predict = ll_seg_out[:, :, int(pad_h):(height-int(pad_h)), int(pad_w):(width-int(pad_w))]
+        ll_seg_mask = torch.nn.functional.interpolate(ll_predict, scale_factor=int(1/ratio), mode='bilinear')
+        _, ll_seg_mask = torch.max(ll_seg_mask, 1)
+        ll_seg_mask = ll_seg_mask.int().squeeze().cpu().numpy()
+        
         # ADAS: Morphological Cleaning
         da_seg_mask = morphological_process(da_seg_mask.astype(np.uint8))
-
+        
+        
         # ADAS: Curve Fitting
         lane_fit, _ = lane_curve.fit_and_smooth(da_seg_mask)
         
@@ -324,6 +330,9 @@ def detect(cfg, opt):
         # ----------------------------------------------------
         # Prepare clean RGB frame for YOLOv8
         rgb_frame = cv2.cvtColor(img_det, cv2.COLOR_BGR2RGB)
+        
+        # Apply drive area mask
+        img_det = show_seg_result(img_det, (da_seg_mask, ll_seg_mask), _, _, is_demo=True)
         
         # 1. Calculate ROI Polygon
         roi_poly = get_roi_polygon(h_draw, w_draw)
@@ -364,9 +373,9 @@ def detect(cfg, opt):
         
         # 1. Paint Road (Green)
         # We manually apply the mask here, replacing show_seg_result
-        color_mask = np.zeros_like(img_det)
-        color_mask[da_seg_mask == 1] = [0, 255, 0] 
-        img_det = cv2.addWeighted(img_det, 1.0, color_mask, 0.3, 0)
+        # color_mask = np.zeros_like(img_det)
+        # color_mask[da_seg_mask == 1] = [0, 255, 0] 
+        # img_det = cv2.addWeighted(img_det, 1.0, color_mask, 0.3, 0)
 
         # 2. Paint ROI
         draw_roi_visuals(img_det, roi_poly)
