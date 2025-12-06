@@ -331,9 +331,6 @@ def detect(cfg, opt):
         # Prepare clean RGB frame for YOLOv8
         rgb_frame = cv2.cvtColor(img_det, cv2.COLOR_BGR2RGB)
         
-        # Apply drive area mask
-        img_det = show_seg_result(img_det, (da_seg_mask, ll_seg_mask), _, _, is_demo=True)
-        h_draw, w_draw = img_det.shape[:2]
         # 1. Calculate ROI Polygon
         roi_poly = get_roi_polygon(h_draw, w_draw)
         
@@ -373,9 +370,10 @@ def detect(cfg, opt):
         
         # 1. Paint Road (Green)
         # We manually apply the mask here, replacing show_seg_result
-        # color_mask = np.zeros_like(img_det)
-        # color_mask[da_seg_mask == 1] = [0, 255, 0] 
-        # img_det = cv2.addWeighted(img_det, 1.0, color_mask, 0.3, 0)
+        color_mask = np.zeros_like(img_det)
+        color_mask[da_seg_mask == 1] = [0, 255, 0]
+        color_mask[ll_seg_mask == 1] = [200, 255, 4]
+        img_det = cv2.addWeighted(img_det, 1.0, color_mask, 0.3, 0)
 
         # 2. Paint ROI
         draw_roi_visuals(img_det, roi_poly)
