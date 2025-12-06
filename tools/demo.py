@@ -287,18 +287,22 @@ def detect(cfg, opt):
     
         # Unpack shapes for scaling masks back to original size
         _, _, height, width = img.shape 
+        scale_y, scale_x = shapes[1][0]  # This is the correct scale factor (usually same)
+        pad_left, pad_top = shapes[1][1]
+        pad_right = width - pad_left - shapes[0][1]
+        pad_bottom = height - pad_top - shapes[0][0]
         pad_w, pad_h = shapes[1][1]
         ratio = shapes[1][0][1]
 
         # Process Drivable Area (Road)
-        da_predict = da_seg_out[:, :, int(pad_h):(height-int(pad_h)), int(pad_w):(width-int(pad_w))]
-        da_seg_mask = torch.nn.functional.interpolate(da_predict, scale_factor=int(1/ratio), mode='bilinear')
+        da_predict = da_seg_out[:, :, int(pad_top):int(height - pad_bottom), int(pad_left):int(width - pad_right)]
+        da_seg_mask = torch.nn.functional.interpolate(da_predict, size=shapes[0][:2], mode='bilinear', align_corners=False)
         _, da_seg_mask = torch.max(da_seg_mask, 1)
         da_seg_mask = da_seg_mask.int().squeeze().cpu().numpy()
         
         # ADAS: Morphological Cleaning
         da_seg_mask = morphological_process(da_seg_mask.astype(np.uint8))
-        da_seg_mask = cv2.resize(da_seg_mask, (w_draw, h_draw), interpolation=cv2.INTER_NEAREST)
+        # da_seg_mask = cv2.resize(da_seg_mask, (w_draw, h_draw), interpolation=cv2.INTER_NEAREST)
 
         # ADAS: Curve Fitting
         lane_fit, _ = lane_curve.fit_and_smooth(da_seg_mask)
@@ -309,10 +313,9 @@ def detect(cfg, opt):
         raw_deviation = 0
         if lane_fit is not None:
             # Calculate deviation at the bottom of the screen
-            car_pos_x = lane_fit[0]*(h_draw**2) + lane_fit[1]*h_draw + lane_fit[2]
-            lane_center_x = car_pos_x
-            screen_center_x = w_draw / 2
-            raw_deviation = lane_center_x - screen_center_x
+            bottom_y = h_draw - 1
+            predicted_x = lane_fit[0] * (bottom_y ** 2) + lane_fit[1] * bottom_y + lane_fit[2]
+            raw_deviation = predicted_x - (w_draw / 2)
         
         filtered_deviation = kalman.update(raw_deviation)
         
