@@ -1,8 +1,6 @@
 import argparse
 import os, sys
 import shutil
-import time
-from pathlib import Path
 import cv2
 import torch
 import torch.backends.cudnn as cudnn
@@ -21,7 +19,7 @@ from lib.models import get_net
 from lib.dataset import LoadImages, LoadStreams
 from lib.utils import plot_one_box
 
-# Initialize Secondary Model (Object Detection)
+# Initialize Secondary Model
 model_det = YOLO("tools/yolov8s.pt")
 normalize = transforms.Normalize(
         mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
@@ -33,16 +31,12 @@ transform = transforms.Compose([
         ])
 
 # ============================================================
-#  1. DYNAMIC ROI LOGIC (Scale-Invariant)
+#  1. ROI & VISUALIZATION
 # ============================================================
 
 def get_roi_polygon(h, w):
-    """Calculates the ROI polygon based on ACTUAL frame dimensions."""
-    # Vertical: Horizon at 40%, Hood at 100%
     top_y = int(h * 0.40)
     bot_y = int(h * 1.00) - 1 
-    
-    # Horizontal: Top width 40%, Bottom 100%
     center_x = w // 2
     top_half_w = int((w * 0.40) / 2)
     
@@ -50,29 +44,15 @@ def get_roi_polygon(h, w):
     tr = (center_x + top_half_w, top_y)
     bl = (0, bot_y)
     br = (w, bot_y)
-    
-    pts = np.array([bl, tl, tr, br], dtype=np.int32)
-    return pts
+    return np.array([bl, tl, tr, br], dtype=np.int32)
 
 def check_roi_intersection(box, roi_poly, h, w):
-    """ Checks if a detected box touches the ROI polygon """
     x1, y1, x2, y2 = map(int, box)
-    
     mask_roi = np.zeros((h, w), dtype=np.uint8)
     cv2.fillPoly(mask_roi, [roi_poly], 1)
-    
     mask_box = np.zeros((h, w), dtype=np.uint8)
     cv2.rectangle(mask_box, (x1, y1), (x2, y2), 1, -1)
-    
-    overlap = cv2.bitwise_and(mask_roi, mask_box)
-    return np.count_nonzero(overlap) > 0
-
-def draw_roi_visuals(img, roi_poly):
-    cv2.polylines(img, [roi_poly], isClosed=True, color=(0, 255, 255), thickness=3)
-
-# ============================================================
-#  2. UX/UI FUNCTIONS
-# ============================================================
+    return np.count_nonzero(cv2.bitwise_and(mask_roi, mask_box)) > 0
 
 def draw_hud_panel(img, status, speed, steering):
     h, w = img.shape[:2]
@@ -82,89 +62,85 @@ def draw_hud_panel(img, status, speed, steering):
     cv2.addWeighted(overlay, 0.7, img, 0.3, 0, img)
     
     c_red, c_green, c_yellow = (50, 50, 255), (50, 255, 50), (0, 255, 255)
-    status_color = c_green
-    if status == "STOP": status_color = c_red
-    elif status == "SLOW": status_color = c_yellow
+    status_color = c_green if status == "NORMAL" else (c_red if status == "STOP" else c_yellow)
 
     font = cv2.FONT_HERSHEY_DUPLEX
-    cv2.putText(img, "AUTOPILOT STATUS", (30, 35), font, 0.6, (180,180,180), 1)
+    cv2.putText(img, "AUTOPILOT", (30, 35), font, 0.6, (180,180,180), 1)
     cv2.putText(img, status, (30, 75), font, 1.2, status_color, 2)
 
-    steer_text = f"DIR: {steering}"
+    steer_text = f"{steering}"
     text_size = cv2.getTextSize(steer_text, font, 1.0, 2)[0]
     center_x = (w - text_size[0]) // 2
-    cv2.putText(img, steer_text, (center_x, 65), font, 1.0, (240,240,240), 2)
+    cv2.putText(img, steer_text, (center_x, 65), font, 1.0, (255,255,255), 2)
 
     speed_text = f"{speed} km/h"
     speed_val_size = cv2.getTextSize(speed_text, font, 1.2, 2)[0]
     cv2.putText(img, "SPEED", (w - 40 - speed_val_size[0], 35), font, 0.6, (180,180,180), 1)
     cv2.putText(img, speed_text, (w - 30 - speed_val_size[0], 75), font, 1.2, c_yellow, 2)
-    cv2.line(img, (0, header_h), (w, header_h), (255, 191, 0), 2)
 
 def draw_3d_arrow(img, deviation):
     h, w = img.shape[:2]
     cx = w // 2
-    base_y = h - 250   
-    notch_y = base_y - 50        
-    tip_y = base_y - 160         
-    base_width = 75       
-    visual_shift = int(deviation * 3.5) 
+    base_y = h - 150   
+    tip_y = base_y - 100         
     
+    # Scale deviation for visual impact (Look-ahead creates smaller numbers, so we scale up)
+    visual_shift = int(deviation * 1.5) 
+    
+    # Clamp visual shift to keep arrow on screen
+    visual_shift = max(-200, min(200, visual_shift))
+
     pts = np.array([
-        (cx - base_width, base_y),
-        (cx + visual_shift, tip_y),
-        (cx + base_width, base_y),
-        (cx, notch_y)
+        (cx - 40, base_y),          # Bottom Left
+        (cx + visual_shift, tip_y), # Tip (moves left/right)
+        (cx + 40, base_y),          # Bottom Right
+        (cx, base_y - 20)           # Notch
     ], dtype=np.int32)
 
-    cv2.fillPoly(img, [pts + 6], (0, 0, 0)) # Shadow
-    cv2.fillPoly(img, [pts], (255, 200, 0)) # Fill
-    cv2.polylines(img, [pts], True, (255, 255, 255), 3) # Border
-
-def draw_modern_label(img, text, x, y, bg_color):
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    (text_w, text_h), _ = cv2.getTextSize(text, font, 0.5, 1)
-    cv2.rectangle(img, (x, y - text_h - 10), (x + text_w + 10, y), bg_color, -1)
-    cv2.putText(img, text, (x + 5, y - 5), font, 0.5, (255,255,255), 1)
+    cv2.fillPoly(img, [pts + 4], (0, 0, 0)) # Shadow
+    cv2.fillPoly(img, [pts], (255, 100, 0)) # Blue/Cyan Fill
+    cv2.polylines(img, [pts], True, (255, 255, 255), 2) # Border
 
 # ============================================================
-#  3. MATH & FILTERING MODULES
+#  2. MATH & SMOOTHING (CORE FIXES)
 # ============================================================
 
-class KalmanSmoother:
-    def __init__(self, process_noise=1e-5, measurement_noise=1e-1, estimated_error=1.0):
-        self.q = process_noise       
-        self.r = measurement_noise   
-        self.p = estimated_error     
-        self.x = 0.0                 
-        self.k = 0.0                 
+class SmoothFilter:
+    """Simple Exponential Moving Average for heavy damping"""
+    def __init__(self, alpha=0.1):
+        self.alpha = alpha
+        self.val = 0
 
-    def update(self, measurement):
-        self.p = self.p + self.q
-        self.k = self.p / (self.p + self.r)
-        self.x = self.x + self.k * (measurement - self.x)
-        self.p = (1 - self.k) * self.p
-        return self.x
+    def update(self, current):
+        self.val = (self.alpha * current) + ((1 - self.alpha) * self.val)
+        return self.val
 
 class LaneCurvature:
-    def __init__(self, alpha=0.7):
+    def __init__(self, alpha=0.9): # High alpha = Keep history (Very smooth curve)
         self.alpha = alpha  
         self.avg_fit = None 
 
     def fit_and_smooth(self, mask_binary):
-        # Get coordinates of drivable area
-        y_idxs, x_idxs = np.where(mask_binary == 1)
+        # 1. FIX: Keep only the largest contour (Remove noise blobs)
+        contours, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours: return None, None
+        
+        largest_cnt = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(largest_cnt) < 2000: return None, None # Ignore tiny fragments
 
-        if len(y_idxs) < 50: 
-            return None, None
+        # Draw only the largest chunk for calculation
+        clean_mask = np.zeros_like(mask_binary)
+        cv2.drawContours(clean_mask, [largest_cnt], -1, 1, thickness=cv2.FILLED)
+        
+        y_idxs, x_idxs = np.where(clean_mask == 1)
 
-        # Fit 2nd Order Polynomial
+        # Fit Polynomial
         try:
             current_fit = np.polyfit(y_idxs, x_idxs, 2)
         except np.RankWarning:
             return None, None
 
-        # EMA Smoothing
+        # Smooth Coefficients
         if self.avg_fit is None:
             self.avg_fit = current_fit
         else:
@@ -172,186 +148,147 @@ class LaneCurvature:
 
         return self.avg_fit, (y_idxs, x_idxs)
 
+    def calculate_deviation(self, fit, h, w):
+        if fit is None: return 0
+        
+        # 2. FIX: Look-Ahead Logic
+        # Calculate X position at 60% of screen height (not bottom)
+        # This predicts where the road IS GOING.
+        lookahead_y = h * 0.60 
+        
+        target_x = fit[0]*(lookahead_y**2) + fit[1]*lookahead_y + fit[2]
+        screen_center = w / 2
+        
+        # Deviation: Negative = LEFT, Positive = RIGHT
+        deviation = target_x - screen_center
+        return deviation
+
     def generate_plot_points(self, fit, h):
         if fit is None: return None
-        plot_y = np.linspace(0, h-1, h)
+        plot_y = np.linspace(h*0.4, h-1, h) # Only draw from horizon down
         try:
             plot_x = fit[0]*plot_y**2 + fit[1]*plot_y + fit[2]
-        except TypeError:
-            return None
-        
-        pts = np.array([np.transpose(np.vstack([plot_x, plot_y]))])
-        return np.int32(pts)
-
-def morphological_process(mask, kernel_size=5):
-    kernel = np.ones((kernel_size, kernel_size), np.uint8)
-    cleaned = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kernel)
-    return cleaned
+        except TypeError: return None
+        return np.int32(np.array([np.transpose(np.vstack([plot_x, plot_y]))]))
 
 # ============================================================
-#  4. MAIN DETECTION LOGIC
+#  3. MAIN LOGIC
 # ============================================================
-kalman = KalmanSmoother(process_noise=0.1, measurement_noise=5.0)
-lane_curve = LaneCurvature(alpha=0.8)
+# Smoothers
+lane_curve = LaneCurvature(alpha=0.85) # Smooths the polynomial line
+arrow_smoother = SmoothFilter(alpha=0.08) # Very heavy smoother for the UI Arrow (0.05 - 0.1)
 
 def detect(cfg, opt):
     # Setup
     logger, _, _ = create_logger(cfg, cfg.LOG_DIR, 'demo')
     device = select_device(logger, opt.device)
     half = device.type != 'cpu'
-    
     if os.path.exists(opt.save_dir): shutil.rmtree(opt.save_dir)
     os.makedirs(opt.save_dir)
 
     # Load YOLOP
     model = get_net(cfg)
-    checkpoint = torch.load(opt.weights, map_location=device)
-    model.load_state_dict(checkpoint['state_dict'])
-    model = model.to(device)
-    if half: model.half()
+    model.load_state_dict(torch.load(opt.weights, map_location=device)['state_dict'])
+    model = model.to(device).half() if half else model.float()
+    model.eval()
 
     # Load Data
-    if opt.source.isnumeric():
-        cudnn.benchmark = True
-        dataset = LoadStreams(opt.source, img_size=opt.img_size)
-    else:
-        dataset = LoadImages(opt.source, img_size=opt.img_size)
-
-    vid_path, vid_writer = None, None
+    dataset = LoadStreams(opt.source, img_size=opt.img_size) if opt.source.isnumeric() else LoadImages(opt.source, img_size=opt.img_size)
     
     # Warmup
     img = torch.zeros((1, 3, opt.img_size, opt.img_size), device=device)
-    _ = model(img.half() if half else img) if device.type != 'cpu' else None 
-    model.eval()
+    _ = model(img.half() if half else img)
+
+    vid_path, vid_writer = None, None
     
-    # Loop
     for i, (path, img, img_det, vid_cap, shapes) in tqdm(enumerate(dataset), total=len(dataset)):
-        
-        # Handle Stream vs Image
-        if isinstance(img_det, list):
-            img_det = img_det[i] if len(img_det) > i else img_det[0]
-            
+        if isinstance(img_det, list): img_det = img_det[0]
         h_draw, w_draw = img_det.shape[:2]
 
-        # Preprocess
-        img = transform(img).to(device)
-        img = img.half() if half else img.float()
+        # Inference
+        img = transform(img).to(device).half() if half else transform(img).to(device).float()
         if img.ndimension() == 3: img = img.unsqueeze(0)
             
-        # ----------------------------------------------------
-        # A. YOLOP INFERENCE
-        # ----------------------------------------------------
         with torch.no_grad():
             det_out, da_seg_out, ll_seg_out = model(img)
-    
-        # Scaling info
-        _, _, height, width = img.shape 
-        pad_w, pad_h = shapes[1][1]
-        ratio = shapes[1][0][1]
 
-        # 1. Process Drivable Area (for Curve Fitting)
-        da_predict = da_seg_out[:, :, int(pad_h):(height-int(pad_h)), int(pad_w):(width-int(pad_w))]
+        # Resizing Masks
+        pad_w, pad_h = shapes[1][1]
+        pad_w, pad_h = int(pad_w), int(pad_h)
+        ratio = shapes[1][0][1]
+        
+        # 1. Drivable Area (Green)
+        da_predict = da_seg_out[:, :, pad_h:(img.shape[2]-pad_h), pad_w:(img.shape[3]-pad_w)]
         da_seg_mask = torch.nn.functional.interpolate(da_predict, scale_factor=int(1/ratio), mode='bilinear')
         _, da_seg_mask = torch.max(da_seg_mask, 1)
-        da_seg_mask = da_seg_mask.int().squeeze().cpu().numpy()
+        da_seg_mask = da_seg_mask.int().squeeze().cpu().numpy().astype(np.uint8)
         
-        # 2. Process Lane Lines (for Visualization)
-        ll_predict = ll_seg_out[:, :, int(pad_h):(height-int(pad_h)), int(pad_w):(width-int(pad_w))]
+        # 2. Lane Lines (Cyan) - New Addition
+        ll_predict = ll_seg_out[:, :, pad_h:(img.shape[2]-pad_h), pad_w:(img.shape[3]-pad_w)]
         ll_seg_mask = torch.nn.functional.interpolate(ll_predict, scale_factor=int(1/ratio), mode='bilinear')
         _, ll_seg_mask = torch.max(ll_seg_mask, 1)
-        ll_seg_mask = ll_seg_mask.int().squeeze().cpu().numpy()
+        ll_seg_mask = ll_seg_mask.int().squeeze().cpu().numpy().astype(np.uint8)
+
+        # ----------------------------------------------------
+        # LOGIC & CALCULATIONS
+        # ----------------------------------------------------
         
-        # 3. Clean and Fit
-        da_seg_mask = morphological_process(da_seg_mask.astype(np.uint8))
+        # Get smooth polynomial
         lane_fit, _ = lane_curve.fit_and_smooth(da_seg_mask)
         
-        # ----------------------------------------------------
-        # B. STEERING LOGIC
-        # ----------------------------------------------------
-        raw_deviation = 0
-        if lane_fit is not None:
-            car_pos_x = lane_fit[0]*(h_draw**2) + lane_fit[1]*h_draw + lane_fit[2]
-            lane_center_x = car_pos_x
-            screen_center_x = w_draw / 2
-            raw_deviation = lane_center_x - screen_center_x
+        # Calculate Deviation using Look-Ahead
+        raw_deviation = lane_curve.calculate_deviation(lane_fit, h_draw, w_draw)
         
-        filtered_deviation = kalman.update(raw_deviation)
+        # Apply Heavy Smoothing for the Arrow UI
+        smooth_deviation = arrow_smoother.update(raw_deviation)
         
         steering = "STRAIGHT"
-        if filtered_deviation > 20: steering = "RIGHT"
-        elif filtered_deviation < -20: steering = "LEFT"
+        if smooth_deviation > 25: steering = "RIGHT"
+        elif smooth_deviation < -25: steering = "LEFT"
 
-        # ----------------------------------------------------
-        # C. YOLOv8 OBJECT DETECTION
-        # ----------------------------------------------------
+        # YOLOv8 Object Detection
         rgb_frame = cv2.cvtColor(img_det, cv2.COLOR_BGR2RGB)
         roi_poly = get_roi_polygon(h_draw, w_draw)
-        
         results = model_det.predict(rgb_frame, conf=0.5, verbose=False)
-        
         boxes = results[0].boxes.xyxy.cpu().numpy()
-        confs = results[0].boxes.conf.cpu().numpy()
-        classes = results[0].boxes.cls.cpu().numpy()
-        det_names = model_det.names
         
-        active_dets = []
-        inactive_dets = []
-        
-        for (xyxy, conf, cls_id) in zip(boxes, confs, classes):
-            if check_roi_intersection(xyxy, roi_poly, h_draw, w_draw):
-                active_dets.append((xyxy, conf, int(cls_id)))
-            else:
-                inactive_dets.append((xyxy, conf, int(cls_id)))
-
+        # Simple Logic for Distance/Status
+        active_dets = [b for b in boxes if check_roi_intersection(b, roi_poly, h_draw, w_draw)]
         closest_dist = 999
-        for (xyxy, conf, cls_id) in active_dets:
-            x1, y1, x2, y2 = map(int, xyxy)
+        for x1, y1, x2, y2 in active_dets:
             dist = int((1.6 * 700) / max(1, (y2 - y1)))
             if dist < closest_dist: closest_dist = dist
-
-        status = "NORMAL"
-        if closest_dist < 8: status = "STOP"
-        elif closest_dist < 15: status = "SLOW"
-        car_speed = 0 if status == "STOP" else (10 if status == "SLOW" else 30)
+            
+        status = "STOP" if closest_dist < 8 else ("SLOW" if closest_dist < 15 else "NORMAL")
+        speed = 0 if status == "STOP" else (10 if status == "SLOW" else 30)
 
         # ----------------------------------------------------
-        # D. VISUALIZATION
+        # VISUALIZATION
         # ----------------------------------------------------
         
-        # 1. Paint Masks (Road = Green, Lanes = Yellow/Green)
+        # Paint Road (Green)
         color_mask = np.zeros_like(img_det)
-        color_mask[da_seg_mask == 1] = [0, 255, 0]    # Road area
-        color_mask[ll_seg_mask == 1] = [200, 255, 4]  # Lane lines
-        img_det = cv2.addWeighted(img_det, 1.0, color_mask, 0.3, 0)
+        color_mask[da_seg_mask == 1] = [0, 255, 0] 
+        # Paint Lane Lines (Cyan) - Fixing Problem #4
+        color_mask[ll_seg_mask == 1] = [255, 255, 0] # Cyan in BGR
+        
+        img_det = cv2.addWeighted(img_det, 1.0, color_mask, 0.4, 0)
 
-        # 2. Paint ROI
-        draw_roi_visuals(img_det, roi_poly)
-
-        # 3. Paint Guidance Curve (Red Line)
+        # Paint Red Curve
         curve_pts = lane_curve.generate_plot_points(lane_fit, h_draw)
         if curve_pts is not None:
-            cv2.polylines(img_det, [curve_pts], isClosed=False, color=(0, 0, 255), thickness=4)
+            cv2.polylines(img_det, [curve_pts], False, (0, 0, 255), 4)
 
-        # 4. Paint Objects
-        for (xyxy, conf, cls_id) in active_dets:
-            x1, y1, x2, y2 = map(int, xyxy)
-            dist = int((1.6 * 700) / max(1, (y2 - y1)))
-            label = f"{det_names.get(int(cls_id))} {dist}m"
-            col = (0, 165, 255)
-            plot_one_box([x1, y1, x2, y2], img_det, label=None, color=col, line_thickness=2)
-            draw_modern_label(img_det, label, x1, y1, col)
-
-        for (xyxy, conf, cls_id) in inactive_dets:
-            x1, y1, x2, y2 = map(int, xyxy)
-            cv2.rectangle(img_det, (x1, y1), (x2, y2), (100, 100, 100), 1)
-
-        # 5. Paint HUD
+        # Paint Arrow (Using the HEAVY smoothed deviation)
         if lane_fit is not None:
-            draw_3d_arrow(img_det, filtered_deviation) 
-        draw_hud_panel(img_det, status, car_speed, steering)
+            draw_3d_arrow(img_det, smooth_deviation)
 
-        # Save/Display
+        # Paint HUD
+        draw_hud_panel(img_det, status, speed, steering)
+
+        # ----------------------------------------------------
+        # SAVE
+        # ----------------------------------------------------
         if not img_det.flags['C_CONTIGUOUS']: img_det = np.ascontiguousarray(img_det)
         save_path = str(opt.save_dir + '/' + "web.avi")
         
@@ -365,11 +302,11 @@ def detect(cfg, opt):
                 if w % 2 != 0 or h % 2 != 0: 
                     w, h = w - (w % 2), h - (h % 2)
                     img_det = img_det[:h, :w]
-                vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'MJPG'), vid_cap.get(cv2.CAP_PROP_FPS) or 30.0, (w, h))
+                vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'MJPG'), 30, (w, h))
             if img_det.shape[0] != h or img_det.shape[1] != w: img_det = img_det[:h, :w]
             vid_writer.write(img_det)
         else:
-            cv2.imshow('image', img_det)
+            cv2.imshow('Result', img_det)
             cv2.waitKey(1)
 
     print(f'Done. Results saved to {opt.save_dir}')
@@ -379,12 +316,8 @@ if __name__ == '__main__':
     parser.add_argument('--weights', nargs='+', type=str, default='weights/End-to-end.pth', help='model.pth path(s)')
     parser.add_argument('--source', type=str, default='inference/videos', help='source') 
     parser.add_argument('--img-size', type=int, default=640, help='inference size (pixels)')
-    parser.add_argument('--conf-thres', type=float, default=0.25, help='object confidence threshold')
-    parser.add_argument('--iou-thres', type=float, default=0.45, help='IOU threshold for NMS')
     parser.add_argument('--device', default='0', help='cuda device')
     parser.add_argument('--save-dir', type=str, default='inference/output', help='directory to save results')
-    parser.add_argument('--augment', action='store_true', help='augmented inference')
-    parser.add_argument('--update', action='store_true', help='update all models')
     opt = parser.parse_args()
     with torch.no_grad():
         detect(cfg, opt)
