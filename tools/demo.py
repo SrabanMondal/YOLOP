@@ -262,12 +262,16 @@ def detect(cfg, opt):
     model.eval()
     
     # 4. MAIN LOOP
+    # img     = Padded/Resized Tensor (for Model)
+    # img_det = Original Raw Frame (for Drawing)
     for i, (path, img, img_det, vid_cap, shapes) in tqdm(enumerate(dataset), total=len(dataset)):
         
-        # Handle Single Image vs Webcam Stream List
+        # [CRITICAL FIX] Handle Single Image vs Webcam Stream List
+        # If using webcam, img_det is a list. We take the current frame.
         if isinstance(img_det, list):
             img_det = img_det[i] if len(img_det) > i else img_det[0]
             
+        # Define Drawing Dimensions immediately (now that img_det is safe)
         h_draw, w_draw = img_det.shape[:2]
 
         # Preprocess Input
@@ -276,55 +280,35 @@ def detect(cfg, opt):
         if img.ndimension() == 3: img = img.unsqueeze(0)
             
         # ----------------------------------------------------
-        # A. YOLOP INFERENCE
+        # A. YOLOP INFERENCE (Lane & Drivable Area)
         # ----------------------------------------------------
         with torch.no_grad():
             det_out, da_seg_out, ll_seg_out = model(img)
     
-        # ----------------------------------------------------
-        # B. SEGMENTATION PROCESSING (Reverse Letterbox)
-        # ----------------------------------------------------
-        
-        # 1. Get Padding info from shapes
-        # shapes[1][1] contains [pad_w, pad_h] used during pre-processing
+        # Unpack shapes for scaling masks back to original size
+        _, _, height, width = img.shape 
         pad_w, pad_h = shapes[1][1]
-        pad_w, pad_h = int(pad_w), int(pad_h)
-        
-        # 2. Upscale Output to Input Tensor Size (e.g. 640x640)
-        # The raw output is smaller (stride 8 or 32), we restore it to input size first.
-        da_seg_out = torch.nn.functional.interpolate(
-            da_seg_out, size=[img.shape[2], img.shape[3]], mode='bilinear', align_corners=False
-        )
-        
-        # 3. Argmax to get binary mask (Channel 1 is road)
-        _, da_seg_mask = torch.max(da_seg_out, 1) # [Batch, H, W]
-        
-        # 4. Crop the Padding (The "Un-Letterbox" step)
-        # We slice out the valid area from the tensor.
-        # Height: pad_h to H - pad_h
-        # Width:  pad_w to W - pad_w
-        _, h_padded, w_padded = da_seg_mask.shape
-        da_seg_mask = da_seg_mask[:, pad_h : h_padded-pad_h, pad_w : w_padded-pad_w]
-        
-        # 5. Resize to Original Image Size
-        # Now we have the clean road mask, just scale it to the raw frame size.
-        # We use unsqueeze to add batch/channel dims for interpolate, then squeeze back.
-        da_seg_mask = da_seg_mask.unsqueeze(1).float() 
-        da_seg_mask = torch.nn.functional.interpolate(
-            da_seg_mask, size=[h_draw, w_draw], mode='nearest'
-        )
-        da_seg_mask = da_seg_mask.int().squeeze().cpu().numpy().astype(np.uint8)
+        ratio = shapes[1][0][1]
 
-        # 6. ADAS: Morphological Cleaning & Curve Fitting
-        # Now the mask matches img_det pixel-perfectly.
-        da_seg_mask = morphological_process(da_seg_mask)
+        # Process Drivable Area (Road)
+        da_predict = da_seg_out[:, :, int(pad_h):(height-int(pad_h)), int(pad_w):(width-int(pad_w))]
+        da_seg_mask = torch.nn.functional.interpolate(da_predict, scale_factor=int(1/ratio), mode='bilinear')
+        _, da_seg_mask = torch.max(da_seg_mask, 1)
+        da_seg_mask = da_seg_mask.int().squeeze().cpu().numpy()
+        
+        # ADAS: Morphological Cleaning
+        da_seg_mask = morphological_process(da_seg_mask.astype(np.uint8))
+        da_seg_mask = cv2.resize(da_seg_mask, (w_draw, h_draw), interpolation=cv2.INTER_NEAREST)
+
+        # ADAS: Curve Fitting
         lane_fit, _ = lane_curve.fit_and_smooth(da_seg_mask)
         
         # ----------------------------------------------------
-        # C. STEERING LOGIC
+        # B. STEERING LOGIC
         # ----------------------------------------------------
         raw_deviation = 0
         if lane_fit is not None:
+            # Calculate deviation at the bottom of the screen
             car_pos_x = lane_fit[0]*(h_draw**2) + lane_fit[1]*h_draw + lane_fit[2]
             lane_center_x = car_pos_x
             screen_center_x = w_draw / 2
@@ -337,11 +321,15 @@ def detect(cfg, opt):
         elif filtered_deviation < -20: steering = "LEFT"
 
         # ----------------------------------------------------
-        # D. YOLOv8 OBJECT DETECTION
+        # C. YOLOv8 OBJECT DETECTION (On Clean Frame)
         # ----------------------------------------------------
+        # Prepare clean RGB frame for YOLOv8
         rgb_frame = cv2.cvtColor(img_det, cv2.COLOR_BGR2RGB)
+        
+        # 1. Calculate ROI Polygon
         roi_poly = get_roi_polygon(h_draw, w_draw)
         
+        # 2. Run YOLO
         results = model_det.predict(rgb_frame, conf=0.5, verbose=False)
         
         boxes = results[0].boxes.xyxy.cpu().numpy()
@@ -352,13 +340,14 @@ def detect(cfg, opt):
         active_dets = []
         inactive_dets = []
         
+        # 3. Filter Boxes
         for (xyxy, conf, cls_id) in zip(boxes, confs, classes):
             if check_roi_intersection(xyxy, roi_poly, h_draw, w_draw):
                 active_dets.append((xyxy, conf, int(cls_id)))
             else:
                 inactive_dets.append((xyxy, conf, int(cls_id)))
 
-        # Status
+        # 4. Determine Status
         closest_dist = 999
         for (xyxy, conf, cls_id) in active_dets:
             x1, y1, x2, y2 = map(int, xyxy)
@@ -371,41 +360,45 @@ def detect(cfg, opt):
         car_speed = 0 if status == "STOP" else (10 if status == "SLOW" else 30)
 
         # ----------------------------------------------------
-        # E. VISUALIZATION
+        # D. VISUALIZATION (Painting on img_det)
         # ----------------------------------------------------
         
-        # Paint Road
+        # 1. Paint Road (Green)
+        # We manually apply the mask here, replacing show_seg_result
         color_mask = np.zeros_like(img_det)
         color_mask[da_seg_mask == 1] = [0, 255, 0] 
         img_det = cv2.addWeighted(img_det, 1.0, color_mask, 0.3, 0)
 
-        # Paint ROI
+        # 2. Paint ROI
         draw_roi_visuals(img_det, roi_poly)
 
-        # Paint Lane Curve
+        # 3. Paint Lane Curve (Red Line)
         curve_pts = lane_curve.generate_plot_points(lane_fit, h_draw)
         if curve_pts is not None:
             cv2.polylines(img_det, [curve_pts], isClosed=False, color=(0, 0, 255), thickness=4)
 
-        # Paint Objects
+        # 4. Paint Active Objects
         for (xyxy, conf, cls_id) in active_dets:
             x1, y1, x2, y2 = map(int, xyxy)
             dist = int((1.6 * 700) / max(1, (y2 - y1)))
             label = f"{det_names.get(int(cls_id))} {dist}m"
-            col = (0, 165, 255)
+            col = (0, 165, 255) # Orange
             plot_one_box([x1, y1, x2, y2], img_det, label=None, color=col, line_thickness=2)
             draw_modern_label(img_det, label, x1, y1, col)
 
+        # 5. Paint Inactive Objects (Gray)
         for (xyxy, conf, cls_id) in inactive_dets:
             x1, y1, x2, y2 = map(int, xyxy)
             cv2.rectangle(img_det, (x1, y1), (x2, y2), (100, 100, 100), 1)
 
-        # Paint HUD
+        # 6. Paint Arrow & HUD
         if lane_fit is not None:
             draw_3d_arrow(img_det, filtered_deviation) 
         draw_hud_panel(img_det, status, car_speed, steering)
 
-        # Save / Display
+        # ----------------------------------------------------
+        # E. SAVE / DISPLAY
+        # ----------------------------------------------------
         if not img_det.flags['C_CONTIGUOUS']: img_det = np.ascontiguousarray(img_det)
         save_path = str(opt.save_dir + '/' + "web.avi")
         
@@ -427,7 +420,7 @@ def detect(cfg, opt):
             cv2.waitKey(1)
 
     print(f'Done. Results saved to {opt.save_dir}')
-    
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--weights', nargs='+', type=str, default='weights/End-to-end.pth', help='model.pth path(s)')
