@@ -292,10 +292,10 @@ def detect(cfg, opt):
 
         # Process Drivable Area (Road)
         da_predict = da_seg_out[:, :, int(pad_h):(height-int(pad_h)), int(pad_w):(width-int(pad_w))]
-        da_seg_mask = torch.nn.functional.interpolate(da_predict, scale_factor=int(1/ratio), mode='bilinear')
-        _, da_seg_mask = torch.max(da_seg_mask, 1)
-        da_seg_mask = da_seg_mask.int().squeeze().cpu().numpy()
-        
+        # da_seg_mask = torch.nn.functional.interpolate(da_predict, scale_factor=int(1/ratio), mode='bilinear')
+        _, da_seg_mask = torch.max(da_predict, 1)
+        da_seg_mask = da_seg_mask.int().squeeze().cpu().numpy().astype(np.uint8)
+        da_seg_mask = cv2.resize(da_seg_mask, (w_draw, h_draw), interpolation=cv2.INTER_NEAREST)
         # ADAS: Morphological Cleaning
         da_seg_mask = morphological_process(da_seg_mask.astype(np.uint8))
 
